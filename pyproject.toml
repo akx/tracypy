@@ -1,0 +1,82 @@
+[project]
+name = "tracypy"
+version = "0.13.1"  # should match the tracy client version
+description = "Lightweight Tracy profiler integration for Python"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE", "third_party/tracy/LICENSE"]
+maintainers = [
+    { name = "Aarni Koskela", email = "akx@iki.fi" }
+]
+requires-python = ">=3.13"
+dependencies = []
+keywords = ["tracy", "profiler", "profiling", "sys.monitoring", "pep669", "performance", "tracing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Free Threading",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/akx/tracypy"
+Repository = "https://github.com/akx/tracypy"
+Issues = "https://github.com/akx/tracypy/issues"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/tracypy"]
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.{h,c,hpp,cpp}" }, { file = "CMakeLists.txt" }]
+
+[build-system]
+requires = ["scikit-build-core>=0.12"]
+build-backend = "scikit_build_core.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.17",
+]
+
+[tool.ruff]
+extend-exclude = ["third_party"]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = [
+    "ANN",
+    "B",
+    "D",
+    "I",
+]
+extend-ignore = [
+    "ANN202",
+    "D203",
+    "D213",
+]
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "ANN",
+    "D",
+]
+"examples/*" = [
+    "ANN",
+    "D",
+]
+
+[tool.ty.src]
+exclude = ["third_party", "tests"]
