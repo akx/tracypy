@@ -424,6 +424,22 @@ py_frame_mark_end(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t n
     Py_RETURN_NONE;
 }
 
+static PyObject *
+py_shutdown(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
+{
+    /* Flush buffered trace data to a connected viewer and tear down Tracy's
+     * worker thread. tracypy calls this from an atexit hook (see __init__.py).
+     *
+     * Idempotent and guarded: a no-op once the profiler is stopped, so calling
+     * it twice is safe. After it returns, Tracy has been finalized and no Tracy
+     * API (zones, frame marks) may be used again, so the atexit hook disables
+     * sys.monitoring first. */
+    if (TracyCIsStarted) {
+        ___tracy_shutdown_profiler();
+    }
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef tracypy_methods[] = {
     {"_on_entry", _PyCFunction_CAST(cb_entry), METH_FASTCALL,
      "sys.monitoring callback for PY_START/PY_RESUME/PY_THROW; begins a Tracy zone."},
@@ -440,6 +456,9 @@ static PyMethodDef tracypy_methods[] = {
     {"frame_mark_end", _PyCFunction_CAST(py_frame_mark_end), METH_FASTCALL,
      "frame_mark_end(name): end the discontinuous frame begun by "
      "frame_mark_start(name)."},
+    {"_shutdown", py_shutdown, METH_NOARGS,
+     "Flush buffered trace data and finalize Tracy. Called from an atexit hook;"
+     " idempotent. No Tracy API may be used after this."},
     {NULL, NULL, 0, NULL},
 };
 
@@ -471,6 +490,11 @@ capture_main_thread_ident(void)
 static int
 exec_module(PyObject *Py_UNUSED(module))
 {
+    /* Manual-lifetime build: bring Tracy up now, at import, before any zone or
+     * frame mark can be emitted (the emit paths assume a live profiler). The
+     * matching ___tracy_shutdown_profiler() runs via atexit; see __init__.py. */
+    ___tracy_startup_profiler();
+
     if (srcloc_index < 0) {
         /* NULL free function: cached source locations are never freed (Tracy may
          * read them lazily; see build_srcloc). A -1 result leaves caching off and

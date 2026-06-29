@@ -23,6 +23,13 @@ find_package(Python 3.13 REQUIRED COMPONENTS Development.Module)
 # module instead of Tracy's headers and CMake package files under site-packages/{include,lib}.
 set(TRACY_ENABLE    ON CACHE BOOL "" FORCE)
 set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+# Manual lifetime (which requires delayed init): tracypy starts Tracy's worker
+# explicitly at module import and shuts it down from an atexit hook, so a clean
+# Python exit flushes the buffered trace tail to a connected viewer. The default
+# mode leaks the profiler and relies on C++ static destruction, which in an
+# embedded .so runs too late (after Python's atexit) or not at all.
+set(TRACY_DELAYED_INIT    ON CACHE BOOL "" FORCE)
+set(TRACY_MANUAL_LIFETIME ON CACHE BOOL "" FORCE)
 # Use a lower-resolution timer instead of exit(1) on CPUs/VMs without an invariant TSC.
 set(TRACY_TIMER_FALLBACK ON CACHE BOOL "" FORCE)
 # Don't install Tracy's signal/crash handlers into the host Python process (they'd

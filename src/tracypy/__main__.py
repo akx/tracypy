@@ -5,8 +5,8 @@ Usage::
     python -m tracypy my_script.py [args...]
     python -m tracypy -m my.module [args...]
 
-Connect a Tracy viewer to localhost to capture the trace. For short runs, set
-``TRACY_NO_EXIT=1`` so the process waits for the trace to be sent before exiting.
+Connect a Tracy viewer to localhost to capture the trace. tracypy flushes the
+buffered trace on a clean exit, so keep the viewer connected until the run ends.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ _USAGE = (
     "       python -m tracypy -m <module> [args...]\n"
     "\n"
     "Connect a Tracy viewer to localhost to capture the trace.\n"
-    "Tip: set TRACY_NO_EXIT=1 for short runs so the trace is flushed on exit."
+    "The buffered trace is flushed on a clean exit; keep the viewer connected."
 )
 
 

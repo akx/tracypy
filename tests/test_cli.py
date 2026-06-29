@@ -105,3 +105,23 @@ def test_profiler_disabled_even_if_target_raises(tmp_path: Path) -> None:
 
     # The finally: in main() must have disabled the profiler despite the error.
     assert not tracypy.is_enabled()
+
+
+def test_clean_exit_does_not_hang_or_crash(tmp_path: Path) -> None:
+    # The atexit shutdown finalizes Tracy on the way out. With no viewer
+    # connected there's nothing to flush, so it must return promptly (not block
+    # the interpreter) and exit cleanly. Run in a subprocess: _shutdown tears
+    # Tracy down for good, so it can't be exercised in the test process itself.
+    import subprocess
+
+    script = tmp_path / "run.py"
+    script.write_text("import tracypy\nwith tracypy.profile():\n    pass\n")
+
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        timeout=30,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
