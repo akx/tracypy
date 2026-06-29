@@ -13,19 +13,22 @@ Or without editing your code::
     python -m tracypy my_script.py
 
 Tracy is built in on-demand mode, so enabling profiling is essentially free
-until a Tracy viewer actually connects. For short scripts profiled with a viewer
-attached, set ``TRACY_NO_EXIT=1`` so the process waits for data to be sent
-before exiting.
+until a Tracy viewer actually connects. On a clean interpreter exit tracypy
+flushes any buffered trace data to a connected viewer automatically (via an
+``atexit`` hook), so even short scripts profiled with a viewer attached don't
+lose their tail.
 """
 
 from __future__ import annotations
 
+import atexit as _atexit
 from sys import monitoring as _mon
 from typing import Self
 
 from tracypy._core import (
     _on_entry,
     _on_exit,
+    _shutdown,
     frame_mark,
     frame_mark_end,
     frame_mark_start,
@@ -164,3 +167,15 @@ class frame:
         """End the named frame; never suppress an exception from the block."""
         frame_mark_end(self.name)
         return False
+
+
+@_atexit.register
+def _flush_on_exit() -> None:
+    """Flush the trace tail to a connected viewer when the interpreter exits.
+
+    Registered at import, so it runs after the user's own atexit handlers (LIFO).
+    Stop sys.monitoring first so no in-flight callback emits into a profiler that
+    ``_shutdown`` is finalizing, then tear Tracy down. Both calls are idempotent.
+    """
+    disable()
+    _shutdown()

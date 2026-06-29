@@ -67,7 +67,7 @@ A runnable demo lives in [`examples/demo.py`](examples/demo.py) — connect a vi
 then:
 
 ```sh
-TRACY_NO_EXIT=1 python -m tracypy examples/demo.py
+python -m tracypy examples/demo.py
 ```
 
 ## Frames
@@ -126,9 +126,6 @@ tracypy vendors the Tracy client **v0.13.1**, so connect with a matching
 **Tracy 0.13.x** viewer — the network protocol is versioned, and a mismatched
 viewer won't connect.
 
-For short scripts, the process may exit before the trace is fully sent. Try
-`TRACY_NO_EXIT=1` so Tracy blocks at exit until the viewer has received everything:
-
-```sh
-TRACY_NO_EXIT=1 python -m tracypy my_script.py
-```
+On a clean exit tracypy flushes the buffered trace to a connected viewer
+automatically (via an `atexit` hook), so even short scripts don't lose their
+tail — just keep the viewer connected until the run finishes.
