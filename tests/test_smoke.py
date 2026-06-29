@@ -54,3 +54,8 @@ def test_frame_marks_do_not_raise() -> None:
     tracypy.frame_mark_end("request")
     with tracypy.frame("request"):
         _workload()
+
+
+def test_is_connected_is_false_without_viewer() -> None:
+    # On-demand: no viewer connects during a normal test run, so this is False.
+    assert tracypy.is_connected() is False

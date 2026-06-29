@@ -108,6 +108,43 @@ def test_frame_marks_reject_bad_names(call) -> None:
         call()
 
 
+@pytest.fixture
+def _record_frame_marks(monkeypatch):
+    # frame.__enter__/__exit__ call the module-global frame_mark_start/end, so
+    # patching them lets us observe the calls without a connected viewer.
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(tracypy, "frame_mark_start", lambda n: calls.append(("start", n)))
+    monkeypatch.setattr(tracypy, "frame_mark_end", lambda n: calls.append(("end", n)))
+    return calls
+
+
+def test_frame_cm_pairs_start_and_end(_record_frame_marks) -> None:
+    with tracypy.frame("request"):
+        _record_frame_marks.append(("body", "request"))
+    assert _record_frame_marks == [("start", "request"), ("body", "request"), ("end", "request")]
+
+
+def test_frame_cm_closes_on_exception(_record_frame_marks) -> None:
+    # The documented guarantee: the frame is closed even if the block raises,
+    # and the exception is not suppressed.
+    with pytest.raises(RuntimeError, match="boom"):
+        with tracypy.frame("request"):
+            raise RuntimeError("boom")
+    assert _record_frame_marks == [("start", "request"), ("end", "request")]
+
+
+def test_flush_on_exit_disables_before_shutdown(monkeypatch) -> None:
+    # The atexit hook must stop monitoring before finalizing Tracy, so no
+    # in-flight callback can emit into a profiler being torn down. Patch both so
+    # the ordering can be asserted without actually shutting Tracy down (which
+    # would break the rest of the suite).
+    calls: list[str] = []
+    monkeypatch.setattr(tracypy, "disable", lambda: calls.append("disable"))
+    monkeypatch.setattr(tracypy, "_shutdown", lambda: calls.append("shutdown"))
+    tracypy._flush_on_exit()
+    assert calls == ["disable", "shutdown"]
+
+
 def test_profiling_across_threads() -> None:
     # Each worker thread builds its own per-thread zone stack in the C extension.
     errors: list[BaseException] = []
