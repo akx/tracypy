@@ -32,12 +32,14 @@ from tracypy._core import (
     frame_mark,
     frame_mark_end,
     frame_mark_start,
+    is_connected,
 )
 
 __all__ = [
     "enable",
     "disable",
     "is_enabled",
+    "is_connected",
     "profile",
     "PROFILER_ID",
     "frame_mark",

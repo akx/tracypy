@@ -425,6 +425,15 @@ py_frame_mark_end(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t n
 }
 
 static PyObject *
+py_is_connected(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
+{
+    /* Whether a Tracy viewer/capture is currently connected. In on-demand mode
+     * nothing is recorded until this is true, so it's the signal to wait on
+     * before generating work you want captured. */
+    return PyBool_FromLong(___tracy_connected());
+}
+
+static PyObject *
 py_shutdown(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
 {
     /* Flush buffered trace data to a connected viewer and tear down Tracy's
@@ -456,6 +465,9 @@ static PyMethodDef tracypy_methods[] = {
     {"frame_mark_end", _PyCFunction_CAST(py_frame_mark_end), METH_FASTCALL,
      "frame_mark_end(name): end the discontinuous frame begun by "
      "frame_mark_start(name)."},
+    {"is_connected", py_is_connected, METH_NOARGS,
+     "is_connected() -> bool: whether a Tracy viewer/capture is connected.\n\n"
+     "On-demand capture records nothing until this is true."},
     {"_shutdown", py_shutdown, METH_NOARGS,
      "Flush buffered trace data and finalize Tracy. Called from an atexit hook;"
      " idempotent. No Tracy API may be used after this."},
