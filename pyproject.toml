@@ -1,6 +1,6 @@
 [project]
 name = "tracypy"
-version = "0.13.1"  # should match the tracy client version
+version = "0.13.1.1"  # should match the tracy client version
 description = "Lightweight Tracy profiler integration for Python"
 readme = "README.md"
 license = "BSD-3-Clause"
