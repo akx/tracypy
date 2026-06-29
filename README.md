@@ -61,7 +61,9 @@ python -m tracypy -m my.module [args...]
 
 `profile()` forwards its `tool_id` / `name` arguments to `enable()`. The low-level
 API is `tracypy.enable(tool_id=PROFILER_ID, name="tracypy")`, `tracypy.disable()`,
-and `tracypy.is_enabled()`.
+and `tracypy.is_enabled()`. `tracypy.is_connected()` reports whether a Tracy
+viewer is currently attached — useful since on-demand capture records nothing
+until one connects.
 
 A runnable demo lives in [`examples/demo.py`](examples/demo.py) — connect a viewer,
 then:
