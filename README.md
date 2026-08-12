@@ -124,8 +124,8 @@ Download or build the [Tracy profiler UI](https://github.com/wolfpld/tracy/relea
 and **Connect** to `localhost` before (or while) your program runs.
 Because Tracy runs on-demand, nothing is captured until you connect.
 
-tracypy vendors the Tracy client **v0.13.1**, so connect with a matching
-**Tracy 0.13.x** viewer — the network protocol is versioned, and a mismatched
+tracypy vendors the Tracy client **v0.14.0**, so connect with a matching
+**Tracy 0.14.x** viewer — the network protocol is versioned, and a mismatched
 viewer won't connect.
 
 On a clean exit tracypy flushes the buffered trace to a connected viewer
