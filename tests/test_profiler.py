@@ -14,24 +14,11 @@ import threading
 import pytest
 
 import tracypy
+from tracypy._core import _zone_depth
 
 
-@pytest.fixture(autouse=True)
-def _ensure_disabled():
-    yield
-    tracypy.disable()
-
-
-def _free_tool_id() -> int:
-    """A sys.monitoring tool id that nothing (incl. tracypy) currently holds."""
-    for tid in range(6):
-        if tid != tracypy.PROFILER_ID and sys.monitoring.get_tool(tid) is None:
-            return tid
-    pytest.skip("no free sys.monitoring tool id available")
-
-
-def test_enable_rejects_tool_id_already_in_use() -> None:
-    tid = _free_tool_id()
+def test_enable_rejects_tool_id_already_in_use(free_tool_id: int) -> None:
+    tid = free_tool_id
     sys.monitoring.use_tool_id(tid, "someone-else")
     try:
         with pytest.raises(RuntimeError, match="already in use"):
@@ -165,3 +152,35 @@ def test_profiling_across_threads() -> None:
 
     assert not errors
     assert not tracypy.is_enabled()
+
+
+def test_disable_closes_zones_left_open() -> None:
+    """Zones must not outlive the profiling session that opened them.
+
+    set_events(0) takes effect immediately, so the frames executing at that
+    moment — disable() itself, and profile.__exit__ above it — never receive
+    their exit event. Without an explicit unwind their zones stayed open for the
+    rest of the trace, and the stack grew by two on every profile() block.
+    """
+    assert _zone_depth() == 0
+    with tracypy.profile():
+        pass
+    assert _zone_depth() == 0
+
+    tracypy.enable()
+    tracypy.disable()
+    assert _zone_depth() == 0
+
+
+def test_disable_closes_zones_from_nested_frames() -> None:
+    # disable() called several frames deep: none of those frames will get an
+    # exit event either, so all of their zones have to be closed too.
+    def deep(n: int) -> None:
+        if n:
+            deep(n - 1)
+        else:
+            tracypy.disable()
+
+    tracypy.enable()
+    deep(10)
+    assert _zone_depth() == 0

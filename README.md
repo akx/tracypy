@@ -28,8 +28,9 @@ pip install tracypy        # or: uv pip install tracypy
 ```
 
 Prebuilt wheels are published for CPython 3.13 and 3.14 (including the free-threaded
-3.14t build) on Linux, macOS, and Windows, with the Tracy client statically linked —
-no toolchain or submodule needed. There is no source distribution, so on a platform
+3.14t build) on Linux, macOS, and 64-bit Windows, with the Tracy client statically
+linked — no toolchain or submodule needed. 32-bit Windows is not supported: Tracy's
+client can't be built for it. There is no source distribution, so on a platform
 or Python without a matching wheel, install from a Git checkout (below) instead.
 
 ### From source
@@ -71,6 +72,39 @@ then:
 ```sh
 python -m tracypy examples/demo.py
 ```
+
+## Zones
+
+Every Python function call is already its own zone.
+When a function is too coarse, open an explicit zone around just the part you care about:
+
+```python
+with tracypy.zone("db query", text=sql, color=0x0088FF):
+    cursor.execute(sql)
+```
+
+Explicit zones nest inside the automatic per-function ones.
+
+You can also annotate whichever zone is currently open:
+
+```python
+def handle(request):
+    tracypy.zone_text(f"user={request.user_id}")  # extra detail in the viewer
+    tracypy.zone_value(len(request.body))         # a number shown on the zone
+    tracypy.zone_color(0xAA0000)
+    tracypy.zone_name("handle:" + request.path)   # override the displayed name
+```
+
+Passing `text=` / `value=` / `color=` to `tracypy.zone(...)`
+does the same thing in one step, and is checked when the zone is created —
+so a bad argument is reported at the line that wrote it.
+
+
+> [!NOTE]
+> **Don't suspend inside a `tracypy.zone(...)` block.**
+> A `yield` or `await` between entry and exit interleaves with the per-frame zones
+> `sys.monitoring` pushes, and Tracy's zones are a strict per-thread stack.
+> Nothing corrupts, but the zone closes at the wrong point.
 
 ## Frames
 
@@ -118,14 +152,49 @@ if the context manager doesn't fit.
 Frame marks are independent of zone capture — they work whether or not
 `enable()` is on, and are inert until a viewer connects.
 
+## Messages
+
+Messages are timestamped strings on the emitting thread's timeline.
+
+```python
+tracypy.message("cache miss")                      # defaults to "info"
+tracypy.message("retrying upload", "warning")
+tracypy.message("checkpoint", "info", 0x00AA00)    # 0xRRGGBB, 0 = viewer default
+```
+
+Severity is one of `trace`, `debug`, `info`, `warning`, `error`, `fatal`
+(`warn` and `critical` are accepted as aliases, and case doesn't matter).
+
+If you prefer symbols to strings, `tracypy.Severity.WARNING` and the raw ints work too.
+
+Each severity also has a fast shorthand, named as in `logging`:
+
+```python
+tracypy.warning("retrying upload")
+tracypy.critical("out of disk", 0xFF0000)
+```
+
+Since Python's logging levels line up with those severities,
+you can mirror your existing log output into the trace with a handler:
+
+```python
+import logging, tracypy
+
+logging.getLogger().addHandler(tracypy.LogHandler())
+```
+
+Log records then appear inline with the zones that produced them, colored by level.
+`LogHandler` is a plain `logging.Handler`, so levels, filters, and formatters work as usual.
+Text longer than 65534 bytes (Tracy's wire limit) is truncated at a UTF-8 boundary.
+
 ## Viewing a trace
 
 Download or build the [Tracy profiler UI](https://github.com/wolfpld/tracy/releases)
 and **Connect** to `localhost` before (or while) your program runs.
 Because Tracy runs on-demand, nothing is captured until you connect.
 
-tracypy vendors the Tracy client **v0.13.1**, so connect with a matching
-**Tracy 0.13.x** viewer — the network protocol is versioned, and a mismatched
+tracypy vendors the Tracy client **v0.14.0**, so connect with a matching
+**Tracy 0.14.x** viewer — the network protocol is versioned, and a mismatched
 viewer won't connect.
 
 On a clean exit tracypy flushes the buffered trace to a connected viewer

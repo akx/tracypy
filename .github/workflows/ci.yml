@@ -1,6 +1,12 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - master
 
 jobs:
   build:
@@ -19,7 +25,10 @@ jobs:
       - run: uvx cibuildwheel==4.1.0 --output-dir wheelhouse
         env:
           CIBW_BUILD_FRONTEND: "build[uv]"
-          CIBW_SKIP: "*-musllinux*"
+          # win32: Tracy's ETW client (new in 0.14) static_asserts that its
+          # VSyncInfo struct matches the layout the kernel reports, which only
+          # holds on 64-bit — 32-bit Windows can't build the client at all.
+          CIBW_SKIP: "*-musllinux* *-win32"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cibw-wheels-${{ matrix.os }}-${{ strategy.job-index }}
@@ -38,12 +47,20 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/tracy-capture
-          key: tracy-capture-${{ runner.os }}-${{ steps.rev.outputs.sha }}
+          # noisa: bump this whenever the build flags below change, so a cached
+          # binary built with the old ones is not restored.
+          key: tracy-capture-noisa-${{ runner.os }}-${{ steps.rev.outputs.sha }}
       # tracy-capture is built from the vendored submodule so its protocol
       # matches our client exactly. The capture/ CMake pulls Tracy's whole vendor
       # tree (GLFW, freetype, nfd→dbus, …) even though the headless tool links
       # none of it, so those dev packages are needed just to configure. capstone
       # stays on CPM (Tracy needs 6.0; distro packages are too old).
+      #
+      # NO_ISA_EXTENSIONS is essential here: Tracy otherwise compiles with
+      # -march=native, and this binary is cached and downloaded by jobs running
+      # on different runners. GitHub's runner pool is not CPU-homogeneous, so a
+      # binary built on a machine with newer ISA extensions dies with SIGILL on
+      # an older one — intermittently, and for as long as the cache entry lives.
       - name: Build tracy-capture
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -51,7 +68,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config libglfw3-dev libfreetype-dev libdbus-1-dev \
             libpugixml-dev libcurl4-openssl-dev libtbb-dev
-          cmake -S third_party/tracy/capture -B build-capture -DCMAKE_BUILD_TYPE=Release
+          cmake -S third_party/tracy/capture -B build-capture \
+            -DCMAKE_BUILD_TYPE=Release -DNO_ISA_EXTENSIONS=ON
           cmake --build build-capture --target tracy-capture --parallel
           mkdir -p ~/tracy-capture
           cp build-capture/tracy-capture ~/tracy-capture/

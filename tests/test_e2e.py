@@ -9,6 +9,7 @@ other end. Skipped unless ``tracy-capture`` is on PATH (or pointed at by the
 from __future__ import annotations
 
 import os
+import pathlib
 import re
 import shutil
 import socket
@@ -25,28 +26,7 @@ pytestmark = pytest.mark.skipif(
     reason="tracy-capture not found (set TRACY_CAPTURE or put it on PATH)",
 )
 
-# Waits for a viewer to connect, then generates zones via deep recursion for
-# longer than the capture window. is_connected() makes this deterministic:
-# on-demand capture records nothing until tracy-capture has connected, so the
-# work must come after, and it must keep flowing while capture is recording.
-_CLIENT = """
-import time
-import tracypy
-
-with tracypy.profile():
-    deadline = time.monotonic() + 20
-    while not tracypy.is_connected() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    if not tracypy.is_connected():
-        raise SystemExit("no viewer connected")
-
-    def fib(n):
-        return n if n < 2 else fib(n - 1) + fib(n - 2)
-
-    end = time.monotonic() + 10
-    while time.monotonic() < end:
-        fib(16)
-"""
+_CLIENT_PATH = pathlib.Path(__file__).parent / "e2e_client.py"
 
 
 def _free_port() -> int:
@@ -57,7 +37,7 @@ def _free_port() -> int:
 
 def test_capture_records_zones(tmp_path: Path) -> None:
     script = tmp_path / "client.py"
-    script.write_text(_CLIENT)
+    script.write_text(_CLIENT_PATH.read_text())
     out = tmp_path / "trace.tracy"
     port = _free_port()
 
@@ -93,8 +73,9 @@ def test_capture_records_zones(tmp_path: Path) -> None:
                 proc.kill()
                 proc.communicate()
 
-    assert client.returncode == 0, client_out
-    assert capture.returncode == 0, cap_out
+    report = f"client (rc={client.returncode}):\n{client_out}\ncapture (rc={capture.returncode}):\n{cap_out}"
+    assert client.returncode == 0, report
+    assert capture.returncode == 0, report
     # A leading non-zero digit means we actually recorded zones (RealToString
     # formats with separators, e.g. "Zones: 40,000").
     assert re.search(r"Zones:\s*[1-9]", cap_out), cap_out
