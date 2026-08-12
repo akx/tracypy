@@ -16,6 +16,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # a thread-local symbol can't go into a .so).
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# FindPython only looks for free-threaded ("t", gil_disabled) artifacts when told
+# to: that is the fourth element of Python_FIND_ABI, added in CMake 3.30, and it
+# defaults to OFF. Without this a 3.13t/3.14t build fails to configure with
+# "missing: Development.Module" even though the interpreter was found.
+#
+# Set it ONLY for a free-threaded target. Defining Python_FIND_ABI at all also
+# takes over how the pydebug/pymalloc/unicode flags are searched, which breaks
+# ordinary builds against some interpreters (uv's CPython on Linux, for one) —
+# so every other build must keep FindPython's default behavior untouched.
+#
+# scikit-build-core reports the target ABI in SKBUILD_SOABI, which is spelled
+# "cpython-314t-linux-x86_64" on POSIX but "cp314t-win_amd64" on Windows — match
+# both. The include-dir hint it passes ends in "t" on POSIX only (Windows headers
+# live in a plain "include"), and also covers a plain CMake invocation that sets
+# Python_INCLUDE_DIR by hand.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.30
+   AND (SKBUILD_SOABI MATCHES "^cp(ython-)?[0-9]+t" OR Python_INCLUDE_DIR MATCHES "t$"))
+  message(STATUS "Free-threaded target: searching for the gil_disabled ABI")
+  set(Python_FIND_ABI "OFF" "ANY" "ANY" "ON")
+endif()
+
 # 3.13 is the floor: the C module uses PyMutex and Py_MOD_GIL_NOT_USED.
 find_package(Python 3.13 REQUIRED COMPONENTS Development.Module)
 

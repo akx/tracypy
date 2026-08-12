@@ -73,8 +73,9 @@ def test_capture_records_zones(tmp_path: Path) -> None:
                 proc.kill()
                 proc.communicate()
 
-    assert client.returncode == 0, client_out
-    assert capture.returncode == 0, cap_out
+    report = f"client (rc={client.returncode}):\n{client_out}\ncapture (rc={capture.returncode}):\n{cap_out}"
+    assert client.returncode == 0, report
+    assert capture.returncode == 0, report
     # A leading non-zero digit means we actually recorded zones (RealToString
     # formats with separators, e.g. "Zones: 40,000").
     assert re.search(r"Zones:\s*[1-9]", cap_out), cap_out

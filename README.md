@@ -28,8 +28,9 @@ pip install tracypy        # or: uv pip install tracypy
 ```
 
 Prebuilt wheels are published for CPython 3.13 and 3.14 (including the free-threaded
-3.14t build) on Linux, macOS, and Windows, with the Tracy client statically linked —
-no toolchain or submodule needed. There is no source distribution, so on a platform
+3.14t build) on Linux, macOS, and 64-bit Windows, with the Tracy client statically
+linked — no toolchain or submodule needed. 32-bit Windows is not supported: Tracy's
+client can't be built for it. There is no source distribution, so on a platform
 or Python without a matching wheel, install from a Git checkout (below) instead.
 
 ### From source
