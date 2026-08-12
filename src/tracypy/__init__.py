@@ -22,6 +22,8 @@ lose their tail.
 from __future__ import annotations
 
 import atexit as _atexit
+import logging as _logging
+from enum import IntEnum
 from sys import monitoring as _mon
 from typing import Self
 
@@ -29,12 +31,19 @@ from tracypy._core import (
     _on_entry,
     _on_exit,
     _shutdown,
+    _zone_begin,
+    _zone_end,
     _zone_unwind,
     frame_mark,
     frame_mark_end,
     frame_mark_start,
     is_connected,
+    zone_color,
+    zone_name,
+    zone_text,
+    zone_value,
 )
+from tracypy._core import message as _message
 
 __all__ = [
     "enable",
@@ -47,6 +56,22 @@ __all__ = [
     "frame_mark_start",
     "frame_mark_end",
     "frame",
+    "message",
+    "trace",
+    "debug",
+    "info",
+    "warning",
+    "error",
+    "fatal",
+    "critical",
+    "Severity",
+    "LogHandler",
+    "severity_for_level",
+    "zone",
+    "zone_text",
+    "zone_name",
+    "zone_color",
+    "zone_value",
 ]
 
 PROFILER_ID = _mon.PROFILER_ID
@@ -107,9 +132,11 @@ def disable() -> None:
 
     Turning events off takes effect immediately, including for frames already
     executing — this one and its callers included — so their exit events never
-    arrive and their zones are closed here instead. Frames in flight on *other*
-    threads are not reachable and stay open until the trace ends; that's inherent
-    to stopping mid-call, so prefer disabling from a quiet moment.
+    arrive and their zones are closed here instead. That closes every zone open
+    on this thread, so an explicit :class:`zone` block wrapping the call ends
+    early too. Frames in flight on *other* threads are not reachable and stay
+    open until the trace ends; that's inherent to stopping mid-call, so prefer
+    disabling from a quiet moment.
     """
     global _active_tool_id
     if _active_tool_id is None:
@@ -141,6 +168,165 @@ class profile:
     def __exit__(self, *exc_info: object) -> bool:
         """Disable profiling; never suppress an exception from the block."""
         disable()
+        return False
+
+
+class Severity(IntEnum):  # noqa: D101
+    TRACE = 0
+    DEBUG = 1
+    INFO = 2
+    WARNING = 3
+    ERROR = 4
+    FATAL = 5
+
+
+_SEVERITIES = {member.name.lower(): member for member in Severity} | {
+    "warn": Severity.WARNING,
+    "critical": Severity.FATAL,
+}
+
+
+def message(text: str, severity: Severity | str | int = "info", color: int = 0) -> None:
+    """Emit ``text`` as a message on the calling thread's Tracy timeline.
+
+    ``severity`` may be a name (``"info"``, ``"warning"``, …), a :class:`Severity`,
+    or the underlying int; it defaults to ``"info"``. ``color`` is ``0xRRGGBB``,
+    or 0 to let the viewer color by severity::
+
+        tracypy.message("cache miss", "warning")
+
+    Messages are independent of :func:`enable`/zone capture and, like frame marks,
+    are inert until a viewer connects. Text longer than 65534 bytes (Tracy's wire
+    limit) is truncated at a UTF-8 boundary.
+    """
+    if isinstance(severity, str):
+        try:
+            severity = _SEVERITIES[severity.lower()]
+        except KeyError:
+            raise ValueError(f"unknown severity {severity!r}") from None
+    _message(text, severity, color)
+
+
+def trace(text: str, color: int = 0) -> None:
+    """Emit ``text`` at :attr:`Severity.TRACE`. Shorthand for :func:`message`."""
+    _message(text, 0, color)
+
+
+def debug(text: str, color: int = 0) -> None:
+    """Emit ``text`` at :attr:`Severity.DEBUG`. Shorthand for :func:`message`."""
+    _message(text, 1, color)
+
+
+def info(text: str, color: int = 0) -> None:
+    """Emit ``text`` at :attr:`Severity.INFO`. Shorthand for :func:`message`."""
+    _message(text, 2, color)
+
+
+def warning(text: str, color: int = 0) -> None:
+    """Emit ``text`` at :attr:`Severity.WARNING`. Shorthand for :func:`message`."""
+    _message(text, 3, color)
+
+
+def error(text: str, color: int = 0) -> None:
+    """Emit ``text`` at :attr:`Severity.ERROR`. Shorthand for :func:`message`."""
+    _message(text, 4, color)
+
+
+def fatal(text: str, color: int = 0) -> None:
+    """Emit ``text`` at :attr:`Severity.FATAL`. Shorthand for :func:`message`."""
+    _message(text, 5, color)
+
+
+# logging spells this level CRITICAL, and message() already takes that name.
+critical = fatal
+
+
+# Python's levels are coarser than Tracy's and don't line up numerically, so map
+# by threshold: anything at or above a level takes that severity. Levels below
+# DEBUG (custom TRACE levels, typically 5) fall through to Severity.TRACE.
+_LEVEL_SEVERITIES = (
+    (_logging.CRITICAL, Severity.FATAL),
+    (_logging.ERROR, Severity.ERROR),
+    (_logging.WARNING, Severity.WARNING),
+    (_logging.INFO, Severity.INFO),
+    (_logging.DEBUG, Severity.DEBUG),
+)
+
+
+def severity_for_level(levelno: int) -> Severity:
+    """Map a :mod:`logging` level number onto the closest Tracy severity."""
+    for level, severity in _LEVEL_SEVERITIES:
+        if levelno >= level:
+            return severity
+    return Severity.TRACE
+
+
+class LogHandler(_logging.Handler):
+    """A :mod:`logging` handler that mirrors records into the Tracy timeline."""
+
+    def emit(self, record: _logging.LogRecord) -> None:
+        """Format ``record`` and emit it as a message at the mapped severity."""
+        if not is_connected():
+            return
+        try:
+            _message(self.format(record), severity_for_level(record.levelno), 0)
+        except Exception:
+            # A handler must never raise into the logging call site.
+            self.handleError(record)
+
+
+class zone:
+    """Open an explicit Tracy zone around the wrapped block.
+
+    tracypy already gives every Python function its own zone; this adds one at
+    sub-function granularity, for the part of a function you actually care
+    about::
+
+        with tracypy.zone("db query", text=sql, color=0x0088FF):
+            cursor.execute(sql)
+
+    ``text``, ``value`` and ``color`` mirror :func:`zone_text`, :func:`zone_value` and :func:`zone_color`.
+
+    The block is reported at the source location of its ``with`` statement,
+    so it lands on the right line in the viewer.
+
+    **Don't suspend inside the block.** A ``yield`` or ``await`` between
+    ``__enter__`` and ``__exit__`` interleaves with the per-frame zones
+    sys.monitoring is pushing, and Tracy's zones are a strict per-thread stack.
+    """
+
+    __slots__ = ("color", "name", "text", "value")
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        text: str | None = None,
+        value: int | None = None,
+        color: int = 0,
+    ) -> None:
+        """Store the zone ``name`` and the annotations to apply on entry."""
+        self.name = name
+        self.text = text
+        self.value = value
+        self.color = color
+
+    def __enter__(self) -> Self:
+        """Open the zone and apply the annotations given to the constructor."""
+        # _zone_begin reads the `with` statement's source location off this
+        # frame's caller itself, and only when a viewer is connected — resolving
+        # a line number is proportional to how deep the statement sits in its
+        # function, which is not worth paying for on the idle path.
+        _zone_begin(self.name, self.color)
+        if self.text is not None:
+            zone_text(self.text)
+        if self.value is not None:
+            zone_value(self.value)
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        """Close the zone; never suppress an exception from the block."""
+        _zone_end()
         return False
 
 

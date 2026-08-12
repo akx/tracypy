@@ -147,9 +147,12 @@ def _summarize(result: object) -> str:
 
 
 def timed(label: str, fn, *args) -> object:
+    tracypy.message(f"start {label}")
     t0 = time.perf_counter()
     result = fn(*args)
-    print(f"  {label:<22} {time.perf_counter() - t0:6.2f}s  -> {_summarize(result)}")
+    elapsed = time.perf_counter() - t0
+    tracypy.message(f"finished {label} in {elapsed:.2f}s", "debug")
+    print(f"  {label:<22} {elapsed:6.2f}s  -> {_summarize(result)}")
     return result
 
 

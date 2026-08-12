@@ -17,3 +17,15 @@ def _clean_profiler_state():
         assert _zone_depth() == 0, "test left zones open"
     finally:
         tracypy.disable()
+
+
+@pytest.fixture
+def emitted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int, int]]:
+    """Capture the (text, severity, color) triples reaching the extension.
+
+    Patching the C entry point rather than ``message()`` keeps the severity
+    coercion in the code under test.
+    """
+    calls: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(tracypy, "_message", lambda text, severity, color: calls.append((text, severity, color)))
+    return calls

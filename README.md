@@ -72,6 +72,38 @@ then:
 python -m tracypy examples/demo.py
 ```
 
+## Zones
+
+Every Python function call is already its own zone.
+When a function is too coarse, open an explicit zone around just the part you care about:
+
+```python
+with tracypy.zone("db query", text=sql, color=0x0088FF):
+    cursor.execute(sql)
+```
+
+Explicit zones nest inside the automatic per-function ones.
+
+You can also annotate whichever zone is currently open:
+
+```python
+def handle(request):
+    tracypy.zone_text(f"user={request.user_id}")  # extra detail in the viewer
+    tracypy.zone_value(len(request.body))         # a number shown on the zone
+    tracypy.zone_color(0xAA0000)
+    tracypy.zone_name("handle:" + request.path)   # override the displayed name
+```
+
+Passing `text=` / `value=` / `color=` to `tracypy.zone(...)`
+does the same thing in one step.
+
+
+> [!NOTE]
+> **Don't suspend inside a `tracypy.zone(...)` block.**
+> A `yield` or `await` between entry and exit interleaves with the per-frame zones
+> `sys.monitoring` pushes, and Tracy's zones are a strict per-thread stack.
+> Nothing corrupts, but the zone closes at the wrong point.
+
 ## Frames
 
 Tracy frames delimit recurring units of work,
@@ -117,6 +149,41 @@ if the context manager doesn't fit.
 
 Frame marks are independent of zone capture — they work whether or not
 `enable()` is on, and are inert until a viewer connects.
+
+## Messages
+
+Messages are timestamped strings on the emitting thread's timeline.
+
+```python
+tracypy.message("cache miss")                      # defaults to "info"
+tracypy.message("retrying upload", "warning")
+tracypy.message("checkpoint", "info", 0x00AA00)    # 0xRRGGBB, 0 = viewer default
+```
+
+Severity is one of `trace`, `debug`, `info`, `warning`, `error`, `fatal`
+(`warn` and `critical` are accepted as aliases, and case doesn't matter).
+
+If you prefer symbols to strings, `tracypy.Severity.WARNING` and the raw ints work too.
+
+Each severity also has a fast shorthand, named as in `logging`:
+
+```python
+tracypy.warning("retrying upload")
+tracypy.critical("out of disk", 0xFF0000)
+```
+
+Since Python's logging levels line up with those severities,
+you can mirror your existing log output into the trace with a handler:
+
+```python
+import logging, tracypy
+
+logging.getLogger().addHandler(tracypy.LogHandler())
+```
+
+Log records then appear inline with the zones that produced them, colored by level.
+`LogHandler` is a plain `logging.Handler`, so levels, filters, and formatters work as usual.
+Text longer than 65534 bytes (Tracy's wire limit) is truncated at a UTF-8 boundary.
 
 ## Viewing a trace
 
