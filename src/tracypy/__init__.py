@@ -29,6 +29,7 @@ from tracypy._core import (
     _on_entry,
     _on_exit,
     _shutdown,
+    _zone_unwind,
     frame_mark,
     frame_mark_end,
     frame_mark_start,
@@ -102,7 +103,14 @@ def enable(tool_id: int = PROFILER_ID, name: str = "tracypy") -> None:
 
 
 def disable() -> None:
-    """Stop profiling and release the tool id. A no-op if not enabled."""
+    """Stop profiling and release the tool id. A no-op if not enabled.
+
+    Turning events off takes effect immediately, including for frames already
+    executing — this one and its callers included — so their exit events never
+    arrive and their zones are closed here instead. Frames in flight on *other*
+    threads are not reachable and stay open until the trace ends; that's inherent
+    to stopping mid-call, so prefer disabling from a quiet moment.
+    """
     global _active_tool_id
     if _active_tool_id is None:
         return
@@ -114,6 +122,7 @@ def disable() -> None:
         _mon.register_callback(tool_id, event, None)
     _mon.free_tool_id(tool_id)
     _active_tool_id = None
+    _zone_unwind()
 
 
 class profile:

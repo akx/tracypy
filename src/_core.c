@@ -97,6 +97,12 @@ static inline int stack_push(zone_stack_t *st, TracyCZoneCtx ctx)
     return 0;
 }
 
+/* Pop the innermost zone and end it. No-ops on an inactive ctx. */
+static inline void pop_zone(zone_stack_t *st)
+{
+    ___tracy_emit_zone_end(st->data[--st->len]);
+}
+
 /*
  * Build a persistent Tracy source location for a code object and cache it on the
  * object's co_extra slot. Cold path: only the first time we see each code object.
@@ -293,8 +299,7 @@ cb_exit(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t nargs)
     (void)nargs;
     zone_stack_t *st = &tls_stack;  /* resolve TLS once */
     if (st->len != 0) {
-        /* emit_zone_end no-ops on an inactive ctx (idle-pushed or pre-enable). */
-        ___tracy_emit_zone_end(st->data[--st->len]);
+        pop_zone(st);
     }
     Py_RETURN_NONE;
 }
@@ -425,6 +430,35 @@ py_frame_mark_end(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t n
 }
 
 static PyObject *
+py_zone_unwind(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
+{
+    /* End every zone still open on this thread.
+     *
+     * Turning sys.monitoring off stops event delivery immediately, including for
+     * frames already executing — so the frames live at that moment (disable()
+     * itself, profile.__exit__, and anything they were called from) never get
+     * their exit event, and their zones would stay open for the rest of the
+     * trace. tracypy.disable() calls this afterwards to close them.
+     *
+     * Only this thread's stack is reachable from here. Frames in flight on other
+     * threads when profiling stops leak the same way, which is inherent to
+     * stopping mid-call and is documented on disable(). */
+    zone_stack_t *st = &tls_stack;
+    while (st->len != 0) {
+        pop_zone(st);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+py_zone_depth(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
+{
+    /* Exposed for the tests: zone begins and ends must balance, and that
+     * invariant is otherwise invisible from Python. */
+    return PyLong_FromSize_t(tls_stack.len);
+}
+
+static PyObject *
 py_is_connected(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
 {
     /* Whether a Tracy viewer/capture is currently connected. In on-demand mode
@@ -465,6 +499,12 @@ static PyMethodDef tracypy_methods[] = {
     {"frame_mark_end", _PyCFunction_CAST(py_frame_mark_end), METH_FASTCALL,
      "frame_mark_end(name): end the discontinuous frame begun by "
      "frame_mark_start(name)."},
+    {"_zone_unwind", py_zone_unwind, METH_NOARGS,
+     "_zone_unwind(): end every zone still open on this thread.\n\n"
+     "Private: called by tracypy.disable() to close the frames whose exit events\n"
+     "sys.monitoring will never deliver."},
+    {"_zone_depth", py_zone_depth, METH_NOARGS,
+     "_zone_depth() -> int: open zones on this thread. Private; for tests."},
     {"is_connected", py_is_connected, METH_NOARGS,
      "is_connected() -> bool: whether a Tracy viewer/capture is connected.\n\n"
      "On-demand capture records nothing until this is true."},

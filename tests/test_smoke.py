@@ -14,13 +14,6 @@ import pytest
 import tracypy
 
 
-@pytest.fixture(autouse=True)
-def _ensure_disabled():
-    # Never let a failing test leave the profiler enabled for the next one.
-    yield
-    tracypy.disable()
-
-
 def _workload() -> int:
     """A little nested call + generator so entry/exit callbacks actually fire."""
 
