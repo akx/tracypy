@@ -95,7 +95,8 @@ def handle(request):
 ```
 
 Passing `text=` / `value=` / `color=` to `tracypy.zone(...)`
-does the same thing in one step.
+does the same thing in one step, and is checked when the zone is created —
+so a bad argument is reported at the line that wrote it.
 
 
 > [!NOTE]

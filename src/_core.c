@@ -669,8 +669,9 @@ py_zone_value(PyObject *Py_UNUSED(self), PyObject *arg)
  * ------------------------------------------------------------------------- */
 
 /*
- * Fill in the source location of the `with` statement that opened this zone:
- * our caller is zone.__enter__, so one frame further back is the user's code.
+ * Fill in the source location of the `with` statement that opened this zone.
+ * __enter__ is a C method, so it pushes no frame of its own: the running frame
+ * is the user's code, exactly where the zone should be reported.
  *
  * Deliberately called only once connected. f_lineno is not a stored field —
  * PyFrame_GetLineNumber maps the current bytecode offset through the code
@@ -680,22 +681,21 @@ py_zone_value(PyObject *Py_UNUSED(self), PyObject *arg)
  *
  * Tracy copies the strings into its own srcloc storage, so nothing here has to
  * outlive the call — but the copy happens inside ___tracy_alloc_srcloc_name, so
- * that call is made here, while the frame and code references are still held,
- * rather than handing borrowed buffers back to the caller.
+ * that call is made here, while the code reference is still held, rather than
+ * handing borrowed buffers back to the caller.
  */
 static TPY_NOINLINE uint64_t
-alloc_caller_srcloc(const char *name, size_t name_len, uint32_t color)
+alloc_current_srcloc(const char *name, size_t name_len, uint32_t color)
 {
     const char *file = "<unknown>", *func = "<unknown>";
     size_t file_len = 9, func_len = 9;
     uint32_t line = 0;
 
-    PyFrameObject *enter = PyEval_GetFrame();  /* borrowed */
-    PyFrameObject *caller = enter != NULL ? PyFrame_GetBack(enter) : NULL;  /* new ref */
+    PyFrameObject *frame = PyEval_GetFrame();  /* borrowed */
     PyCodeObject *code = NULL;
-    if (caller != NULL) {
-        line = (uint32_t)PyFrame_GetLineNumber(caller);
-        code = PyFrame_GetCode(caller);  /* new reference */
+    if (frame != NULL) {
+        line = (uint32_t)PyFrame_GetLineNumber(frame);
+        code = PyFrame_GetCode(frame);  /* new reference */
     }
     if (code != NULL) {
         Py_ssize_t len = 0;
@@ -707,29 +707,85 @@ alloc_caller_srcloc(const char *name, size_t name_len, uint32_t color)
     uint64_t srcloc = ___tracy_alloc_srcloc_name(line, file, file_len, func, func_len,
                                                  name, name_len, color);
     Py_XDECREF(code);
-    Py_XDECREF(caller);
     return srcloc;
 }
 
-static PyObject *
-py_zone_begin(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t nargs)
+/*
+ * The `zone` context manager.
+ *
+ * This is a C type on purpose. sys.monitoring reports PY_START/PY_RETURN for
+ * *Python* functions, so a context manager written in Python gets a frame zone
+ * of its own around __enter__ — and that frame returns before the `with` body
+ * runs, so its PY_RETURN pops the zone __enter__ had just opened. The explicit
+ * zone would collapse to nothing and the body would be covered by tracypy's own
+ * __enter__ frame instead. A C method pushes no frame, so the zone opened here
+ * stays innermost for the body, which is the whole point of it.
+ *
+ * Everything the caller passes is validated in __init__, where a mistake is
+ * reported at the line that made it, and so that __enter__ has no failure path
+ * between opening the zone and returning: the interpreter does not call __exit__
+ * when __enter__ raises, so a zone opened there would leak onto the stack.
+ */
+typedef struct {
+    PyObject_HEAD
+    PyObject *name;       /* str */
+    PyObject *text;       /* str or None */
+    PyObject *value_obj;  /* int or None, kept for attribute access */
+    uint64_t value;       /* value_obj pre-converted, so __enter__ cannot fail */
+    int has_value;
+    uint32_t color;
+} zone_object;
+
+static int
+zone_init(zone_object *self, PyObject *args, PyObject *kwds)
 {
-    if (nargs != 2) {
-        PyErr_SetString(PyExc_TypeError,
-                        "_zone_begin(name, color) takes 2 arguments");
-        return NULL;
+    static char *kwlist[] = {"name", "text", "value", "color", NULL};
+    PyObject *name = NULL, *text = Py_None, *value = Py_None, *color = NULL;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|$OOO:zone", kwlist,
+                                     &name, &text, &value, &color)) {
+        return -1;
     }
-    /* Check the arguments even while disconnected, so a bad call raises
-     * consistently rather than only once a viewer shows up. Encoding the name,
-     * and looking up the caller's source location, stay on the connected path. */
-    if (check_str(args[0], "zone name") != 0) {
-        return NULL;
+    if (check_str(name, "zone name") != 0) {
+        return -1;
     }
-    uint32_t color = 0;
-    if (resolve_color(args[1], &color) != 0) {
-        return NULL;
+    if (text != Py_None && check_str(text, "zone text") != 0) {
+        return -1;
+    }
+    uint32_t color_val = 0;
+    if (color != NULL && resolve_color(color, &color_val) != 0) {
+        return -1;
+    }
+    uint64_t value_val = 0;
+    if (value != Py_None) {
+        value_val = (uint64_t)PyLong_AsUnsignedLongLong(value);
+        if (value_val == (uint64_t)-1 && PyErr_Occurred() != NULL) {
+            return -1;
+        }
     }
 
+    Py_XSETREF(self->name, Py_NewRef(name));
+    Py_XSETREF(self->text, Py_NewRef(text));
+    Py_XSETREF(self->value_obj, Py_NewRef(value));
+    self->value = value_val;
+    self->has_value = value != Py_None;
+    self->color = color_val;
+    return 0;
+}
+
+static void
+zone_dealloc(zone_object *self)
+{
+    PyTypeObject *tp = Py_TYPE(self);
+    Py_CLEAR(self->name);
+    Py_CLEAR(self->text);
+    Py_CLEAR(self->value_obj);
+    tp->tp_free((PyObject *)self);
+    Py_DECREF(tp);
+}
+
+static PyObject *
+zone_enter(zone_object *self, PyObject *Py_UNUSED(ignored))
+{
     zone_stack_t *st = &tls_stack;  /* resolve TLS once */
     TracyCZoneCtx ctx;
     if (___tracy_connected()) {
@@ -738,29 +794,102 @@ py_zone_begin(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t nargs
         }
         const char *name = NULL;
         size_t name_len = 0;
-        if (resolve_text(args[0], "zone name", &name, &name_len) != 0) {
+        /* self->name was type-checked in __init__; this only encodes it. */
+        if (resolve_text(self->name, "zone name", &name, &name_len) != 0) {
             return NULL;
         }
-        ctx = ___tracy_emit_zone_begin_alloc(alloc_caller_srcloc(name, name_len, color),
+        ctx = ___tracy_emit_zone_begin_alloc(alloc_current_srcloc(name, name_len, self->color),
                                              1 /* active */);
+        /* Annotate before pushing: push_zone ends the zone if the stack cannot
+         * grow, and annotating an already-ended zone would put a ZoneText after
+         * its ZoneEnd on the wire. */
+        if (self->text != Py_None) {
+            const char *s = NULL;
+            size_t len = 0;
+            /* Type-checked in __init__, so this only encodes. */
+            if (resolve_text(self->text, "zone text", &s, &len) == 0) {
+                ___tracy_emit_zone_text(ctx, s, len);
+            } else {
+                PyErr_Clear();
+            }
+        }
+        if (self->has_value) {
+            ___tracy_emit_zone_value(ctx, self->value);
+        }
+        push_zone(st, ctx);
     } else {
-        /* No viewer: skip the zone work but still push, so the matching
-         * _zone_end() pops something and the stack stays balanced. */
-        ctx = TPY_INACTIVE_CTX;
+        /* No viewer: skip the zone work but still push, so __exit__ pops
+         * something and the stack stays balanced. */
+        push_zone(st, TPY_INACTIVE_CTX);
     }
-    push_zone(st, ctx);
-    Py_RETURN_NONE;
+    return Py_NewRef((PyObject *)self);
 }
 
 static PyObject *
-py_zone_end(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
+zone_exit(zone_object *Py_UNUSED(self), PyObject *Py_UNUSED(args))
 {
     zone_stack_t *st = &tls_stack;
     if (st->len != 0) {
         pop_zone(st);
     }
-    Py_RETURN_NONE;
+    Py_RETURN_FALSE;  /* never suppress an exception from the block */
 }
+
+static PyMethodDef zone_methods[] = {
+    {"__enter__", (PyCFunction)zone_enter, METH_NOARGS,
+     "Open the zone and apply the annotations given to the constructor."},
+    {"__exit__", (PyCFunction)zone_exit, METH_VARARGS,
+     "Close the zone; never suppress an exception from the block."},
+    {NULL, NULL, 0, NULL},
+};
+
+static PyMemberDef zone_members[] = {
+    {"name", Py_T_OBJECT_EX, offsetof(zone_object, name), Py_READONLY, "Zone name."},
+    {"text", Py_T_OBJECT_EX, offsetof(zone_object, text), Py_READONLY, "Zone text, or None."},
+    {"value", Py_T_OBJECT_EX, offsetof(zone_object, value_obj), Py_READONLY, "Zone value, or None."},
+    {"color", Py_T_UINT, offsetof(zone_object, color), Py_READONLY, "0xRRGGBB, 0 for default."},
+    {NULL, 0, 0, 0, NULL},
+};
+
+PyDoc_STRVAR(zone_doc,
+"zone(name, *, text=None, value=None, color=0)\n"
+"\n"
+"Open an explicit Tracy zone around the wrapped block.\n"
+"\n"
+"tracypy already gives every Python function its own zone; this adds one at\n"
+"sub-function granularity, for the part of a function you actually care about::\n"
+"\n"
+"    with tracypy.zone(\"db query\", text=sql, color=0x0088FF):\n"
+"        cursor.execute(sql)\n"
+"\n"
+"text, value and color are the annotations zone_text(), zone_value() and\n"
+"zone_color() apply, set in one go; all of them are checked here, at the line\n"
+"that names them. Like everything else here the zone is inert until a viewer\n"
+"connects, and is reported at the source location of its `with` statement.\n"
+"\n"
+"Don't suspend inside the block. A yield or await between __enter__ and\n"
+"__exit__ interleaves with the per-frame zones sys.monitoring is pushing, and\n"
+"Tracy's zones are a strict per-thread stack. Pushes and pops stay balanced, so\n"
+"nothing corrupts, but the zone is closed at the suspend point and the timings\n"
+"around it are attributed to the wrong spans. Keep the block synchronous, or\n"
+"wrap the await in its own function.");
+
+static PyType_Slot zone_type_slots[] = {
+    {Py_tp_doc, (void *)zone_doc},
+    {Py_tp_init, zone_init},
+    {Py_tp_dealloc, zone_dealloc},
+    {Py_tp_methods, zone_methods},
+    {Py_tp_members, zone_members},
+    {Py_tp_new, PyType_GenericNew},
+    {0, NULL},
+};
+
+static PyType_Spec zone_type_spec = {
+    .name = "tracypy._core.zone",
+    .basicsize = sizeof(zone_object),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = zone_type_slots,
+};
 
 static PyObject *
 py_zone_unwind(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
@@ -852,12 +981,6 @@ static PyMethodDef tracypy_methods[] = {
      "zone_color(color): set the innermost open zone's color (0xRRGGBB)."},
     {"zone_value", py_zone_value, METH_O,
      "zone_value(value): attach an unsigned 64-bit number to the innermost zone."},
-    {"_zone_begin", _PyCFunction_CAST(py_zone_begin), METH_FASTCALL,
-     "_zone_begin(name, color): open an explicit zone at the caller's caller.\n\n"
-     "Private: pair it with _zone_end() via the `zone` context manager, whose\n"
-     "`with` statement is the source location the zone is reported at."},
-    {"_zone_end", py_zone_end, METH_NOARGS,
-     "_zone_end(): close the innermost open zone. Private; see _zone_begin."},
     {"_zone_unwind", py_zone_unwind, METH_NOARGS,
      "_zone_unwind(): end every zone still open on this thread.\n\n"
      "Private: called by tracypy.disable() to close the frames whose exit events\n"
@@ -899,7 +1022,7 @@ capture_main_thread_ident(void)
 }
 
 static int
-exec_module(PyObject *Py_UNUSED(module))
+exec_module(PyObject *module)
 {
     /* Manual-lifetime build: bring Tracy up now, at import, before any zone or
      * frame mark can be emitted (the emit paths assume a live profiler). The
@@ -913,7 +1036,14 @@ exec_module(PyObject *Py_UNUSED(module))
         srcloc_index = PyUnstable_Eval_RequestCodeExtraIndex(NULL);
     }
     capture_main_thread_ident();
-    return 0;
+
+    PyObject *zone_type = PyType_FromModuleAndSpec(module, &zone_type_spec, NULL);
+    if (zone_type == NULL) {
+        return -1;
+    }
+    int rc = PyModule_AddObjectRef(module, "zone", zone_type);
+    Py_DECREF(zone_type);
+    return rc;
 }
 
 static PyModuleDef_Slot tracypy_slots[] = {

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 import tracypy
@@ -29,3 +31,12 @@ def emitted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int, int]]:
     calls: list[tuple[str, int, int]] = []
     monkeypatch.setattr(tracypy, "_message", lambda text, severity, color: calls.append((text, severity, color)))
     return calls
+
+
+@pytest.fixture
+def free_tool_id() -> int:
+    """A sys.monitoring tool id nothing holds — tracypy, coverage.py, or a debugger."""
+    for tid in range(6):
+        if tid != tracypy.PROFILER_ID and sys.monitoring.get_tool(tid) is None:
+            return tid
+    pytest.skip("no free sys.monitoring tool id available")

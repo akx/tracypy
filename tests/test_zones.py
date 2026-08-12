@@ -9,6 +9,7 @@ invariant is actually checked rather than assumed.
 from __future__ import annotations
 
 import threading
+from sys import monitoring as mon
 
 import pytest
 
@@ -124,3 +125,65 @@ def test_zone_bad_color() -> None:
 def test_oversized_zone_text(text: str) -> None:
     with tracypy.zone("z"):
         tracypy.zone_text(text)
+
+
+def test_zone_creates_no_python_frame_of_its_own(free_tool_id: int) -> None:
+    """The context manager must not be a Python function.
+
+    sys.monitoring reports PY_START/PY_RETURN for Python functions only. A
+    context manager written in Python gets a frame zone around __enter__, and
+    that frame *returns before the body runs* — so its PY_RETURN pops the zone
+    __enter__ just opened, collapsing the explicit zone to nothing and leaving
+    the body covered by tracypy's own __enter__ frame instead. Implementing the
+    type in C is what prevents that, so assert the frames really are absent.
+    """
+    depths: list[int] = []
+    seen: list[str] = []
+
+    def work() -> None:
+        with tracypy.zone("z", text="t", value=1):
+            depths.append(_zone_depth())
+
+    tool = free_tool_id
+    mon.use_tool_id(tool, "observer")
+    try:
+        mon.register_callback(tool, mon.events.PY_START, lambda code, off: seen.append(code.co_qualname))
+        with tracypy.profile():
+            mon.set_events(tool, mon.events.PY_START)
+            work()
+            mon.set_events(tool, 0)
+    finally:
+        mon.free_tool_id(tool)
+
+    # e.g. "zone.__enter__" / "zone.__exit__" / "zone.__init__"
+    assert not [q for q in seen if q.startswith("zone.")], f"zone created Python frames: {seen}"
+    # work() was entered under profiling, so it has a frame zone; the explicit
+    # zone sits on top of it and stays innermost for the body.
+    assert depths == [2]
+
+
+def test_zone_annotations_are_validated_at_construction() -> None:
+    # __exit__ is not called when __enter__ raises, so a zone opened before a
+    # bad annotation would leak. Everything is checked in __init__ instead,
+    # which also reports the mistake at the line that made it.
+    with pytest.raises(TypeError, match="zone text must be a str"):
+        tracypy.zone("z", text=b"not a str")
+    with pytest.raises(OverflowError):
+        tracypy.zone("z", value=-1)
+    with pytest.raises(ValueError, match="0xRRGGBB"):
+        tracypy.zone("z", color=-1)
+
+
+def test_zone_is_reusable() -> None:
+    z = tracypy.zone("reused")
+    with z:
+        assert _zone_depth() == 1
+    with z:
+        assert _zone_depth() == 1
+
+
+def test_zone_exposes_its_arguments() -> None:
+    z = tracypy.zone("n", text="t", value=5, color=0x112233)
+    assert (z.name, z.text, z.value, z.color) == ("n", "t", 5, 0x112233)
+    bare = tracypy.zone("n")
+    assert (bare.text, bare.value, bare.color) == (None, None, 0)

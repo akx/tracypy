@@ -31,13 +31,12 @@ from tracypy._core import (
     _on_entry,
     _on_exit,
     _shutdown,
-    _zone_begin,
-    _zone_end,
     _zone_unwind,
     frame_mark,
     frame_mark_end,
     frame_mark_start,
     is_connected,
+    zone,
     zone_color,
     zone_name,
     zone_text,
@@ -273,61 +272,6 @@ class LogHandler(_logging.Handler):
         except Exception:
             # A handler must never raise into the logging call site.
             self.handleError(record)
-
-
-class zone:
-    """Open an explicit Tracy zone around the wrapped block.
-
-    tracypy already gives every Python function its own zone; this adds one at
-    sub-function granularity, for the part of a function you actually care
-    about::
-
-        with tracypy.zone("db query", text=sql, color=0x0088FF):
-            cursor.execute(sql)
-
-    ``text``, ``value`` and ``color`` mirror :func:`zone_text`, :func:`zone_value` and :func:`zone_color`.
-
-    The block is reported at the source location of its ``with`` statement,
-    so it lands on the right line in the viewer.
-
-    **Don't suspend inside the block.** A ``yield`` or ``await`` between
-    ``__enter__`` and ``__exit__`` interleaves with the per-frame zones
-    sys.monitoring is pushing, and Tracy's zones are a strict per-thread stack.
-    """
-
-    __slots__ = ("color", "name", "text", "value")
-
-    def __init__(
-        self,
-        name: str,
-        *,
-        text: str | None = None,
-        value: int | None = None,
-        color: int = 0,
-    ) -> None:
-        """Store the zone ``name`` and the annotations to apply on entry."""
-        self.name = name
-        self.text = text
-        self.value = value
-        self.color = color
-
-    def __enter__(self) -> Self:
-        """Open the zone and apply the annotations given to the constructor."""
-        # _zone_begin reads the `with` statement's source location off this
-        # frame's caller itself, and only when a viewer is connected — resolving
-        # a line number is proportional to how deep the statement sits in its
-        # function, which is not worth paying for on the idle path.
-        _zone_begin(self.name, self.color)
-        if self.text is not None:
-            zone_text(self.text)
-        if self.value is not None:
-            zone_value(self.value)
-        return self
-
-    def __exit__(self, *exc_info: object) -> bool:
-        """Close the zone; never suppress an exception from the block."""
-        _zone_end()
-        return False
 
 
 class frame:

@@ -17,16 +17,8 @@ import tracypy
 from tracypy._core import _zone_depth
 
 
-def _free_tool_id() -> int:
-    """A sys.monitoring tool id that nothing (incl. tracypy) currently holds."""
-    for tid in range(6):
-        if tid != tracypy.PROFILER_ID and sys.monitoring.get_tool(tid) is None:
-            return tid
-    pytest.skip("no free sys.monitoring tool id available")
-
-
-def test_enable_rejects_tool_id_already_in_use() -> None:
-    tid = _free_tool_id()
+def test_enable_rejects_tool_id_already_in_use(free_tool_id: int) -> None:
+    tid = free_tool_id
     sys.monitoring.use_tool_id(tid, "someone-else")
     try:
         with pytest.raises(RuntimeError, match="already in use"):
