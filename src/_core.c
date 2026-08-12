@@ -81,6 +81,14 @@ typedef struct {
 
 static TPY_TLS zone_stack_t tls_stack = {0};
 
+/*
+ * The context pushed instead of beginning a zone when no viewer is connected.
+ * Zero-initialized rather than field-by-field so every member is defined,
+ * including ones Tracy adds under build flags (TRACY_ON_DEMAND's connectionId).
+ * Every ___tracy_emit_zone_* call no-ops on an inactive context.
+ */
+static const TracyCZoneCtx TPY_INACTIVE_CTX = {0};
+
 /* Push ctx; returns 0 on success, -1 if the stack could not grow. */
 static inline int stack_push(zone_stack_t *st, TracyCZoneCtx ctx)
 {
@@ -95,6 +103,18 @@ static inline int stack_push(zone_stack_t *st, TracyCZoneCtx ctx)
     }
     st->data[st->len++] = ctx;
     return 0;
+}
+
+/*
+ * Push ctx, or end its zone immediately if the stack could not grow. Either way
+ * begins and ends stay balanced, which is the invariant Tracy's strictly-nested
+ * zones depend on. Every zone opened by this module goes through here.
+ */
+static inline void push_zone(zone_stack_t *st, TracyCZoneCtx ctx)
+{
+    if (stack_push(st, ctx) != 0) {
+        ___tracy_emit_zone_end(ctx);
+    }
 }
 
 /* Pop the innermost zone and end it. No-ops on an inactive ctx. */
@@ -281,13 +301,9 @@ cb_entry(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t nargs)
         } else {
             /* No viewer: skip all zone work. An inactive ctx keeps the stack
              * balanced; the matching exit's emit_zone_end no-ops on it. */
-            ctx.id = 0;
-            ctx.active = 0;
+            ctx = TPY_INACTIVE_CTX;
         }
-        if (stack_push(st, ctx) != 0) {
-            /* Out of memory: end immediately to keep the stack balanced. */
-            ___tracy_emit_zone_end(ctx);
-        }
+        push_zone(st, ctx);
     }
     Py_RETURN_NONE;
 }
@@ -429,6 +445,323 @@ py_frame_mark_end(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t n
     Py_RETURN_NONE;
 }
 
+/* ------------------------------------------------------------------------- *
+ * Messages.
+ *
+ * A message is a timestamped string on the emitting thread's timeline, tagged
+ * with a severity (Tracy 0.14+). Unlike frame names, Tracy copies the text into
+ * its own queue, so nothing needs interning here.
+ *
+ * Tracy stores the length in a uint16_t and only asserts the bound, which is
+ * compiled out in a release build: a 200000-byte message would go out with its
+ * length wrapped to 3392, i.e. arbitrarily cut and possibly mid-code-point. We
+ * clamp ourselves and back off to a UTF-8 boundary, so an over-long message is
+ * merely truncated rather than mangled. (The stream stays well-formed either
+ * way — the size field governs both ends — so this is about message fidelity,
+ * not trace integrity.)
+ * ------------------------------------------------------------------------- */
+#define TPY_TEXT_MAX 65534  /* Tracy requires size < UINT16_MAX */
+
+/*
+ * Type-check a str argument. Split out from resolve_text so the callers that
+ * must reject a bad argument even while disconnected can do so without paying
+ * for the encode. `what` names the argument in the TypeError.
+ */
+static inline int
+check_str(PyObject *arg, const char *what)
+{
+    if (!PyUnicode_Check(arg)) {
+        PyErr_Format(PyExc_TypeError, "%s must be a str", what);
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Resolve a str argument to its UTF-8 bytes, clamped to Tracy's text limit at a
+ * code-point boundary. Returns 0 on success, -1 with an exception set.
+ */
+static int
+resolve_text(PyObject *arg, const char *what, const char **out, size_t *out_len)
+{
+    if (check_str(arg, what) != 0) {
+        return -1;
+    }
+    Py_ssize_t len = 0;
+    const char *s = PyUnicode_AsUTF8AndSize(arg, &len);
+    if (s == NULL) {
+        return -1;
+    }
+    if (len > TPY_TEXT_MAX) {
+        len = TPY_TEXT_MAX;
+        /* Continuation bytes are 10xxxxxx; step back off a split code point. */
+        while (len > 0 && ((unsigned char)s[len] & 0xc0) == 0x80) {
+            len--;
+        }
+    }
+    *out = s;
+    *out_len = (size_t)len;
+    return 0;
+}
+
+/*
+ * Resolve a 0xRRGGBB color argument. Converted as signed so a negative value
+ * reports the same ValueError as an oversized one, instead of letting
+ * OverflowError leak out of the conversion.
+ */
+static int
+resolve_color(PyObject *arg, uint32_t *out)
+{
+    long long color = PyLong_AsLongLong(arg);
+    if (color == -1 && PyErr_Occurred() != NULL) {
+        if (!PyErr_ExceptionMatches(PyExc_OverflowError)) {
+            return -1;
+        }
+        PyErr_Clear();
+        color = -1;  /* out of range either way; fall through to the check */
+    }
+    if (color < 0 || color > 0xffffffLL) {
+        PyErr_SetString(PyExc_ValueError,
+                        "color must be a 0xRRGGBB value in range 0-0xffffff");
+        return -1;
+    }
+    *out = (uint32_t)color;
+    return 0;
+}
+
+static PyObject *
+py_message(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t nargs)
+{
+    /* Private: tracypy.message() and the severity shorthands always pass all
+     * three, and own the defaults. */
+    if (nargs != 3) {
+        PyErr_SetString(PyExc_TypeError,
+                        "message(text, severity, color) takes 3 arguments");
+        return NULL;
+    }
+    /* Severity and color are validated even while disconnected, so a bad call is
+     * an error consistently rather than only once a viewer shows up. */
+    if (check_str(args[0], "message text") != 0) {
+        return NULL;
+    }
+    long severity = PyLong_AsLong(args[1]);
+    if (severity == -1 && PyErr_Occurred() != NULL) {
+        return NULL;
+    }
+    if (severity < 0 || severity > 5) {
+        PyErr_SetString(PyExc_ValueError,
+                        "severity must be in range 0-5 (trace..fatal)");
+        return NULL;
+    }
+    uint32_t color = 0;
+    if (resolve_color(args[2], &color) != 0) {
+        return NULL;
+    }
+
+    /* On-demand mode discards messages while disconnected (Tracy checks this
+     * itself), so skip the UTF-8 encode entirely on the common idle path. */
+    if (___tracy_connected()) {
+        const char *s = NULL;
+        size_t len = 0;
+        if (resolve_text(args[0], "message text", &s, &len) != 0) {
+            return NULL;
+        }
+        ___tracy_emit_logString((int8_t)severity, (int32_t)color,
+                                0 /* callstack depth */, len, s);
+    }
+    Py_RETURN_NONE;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Zone annotations.
+ *
+ * These decorate the innermost zone open on this thread — i.e. the zone for the
+ * Python function that is calling them. All four are no-ops when that zone is
+ * inactive (pushed while disconnected) or belongs to an earlier connection;
+ * Tracy checks both itself, the second via the connection id that 0.14 added to
+ * the zone context.
+ *
+ * With no zone open at all (profiling disabled, or called at module level) there
+ * is nothing to annotate and these do nothing, matching how every other emit
+ * path here stays inert rather than raising.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * The innermost open zone on this thread, or an inactive context if there is
+ * none — every ___tracy_emit_zone_* no-ops on that, so callers need no NULL check.
+ */
+static inline TracyCZoneCtx
+current_zone(void)
+{
+    zone_stack_t *st = &tls_stack;
+    return st->len != 0 ? st->data[st->len - 1] : TPY_INACTIVE_CTX;
+}
+
+/*
+ * Shared body of zone_text/zone_name: type-check, then bail before encoding if
+ * there is no live zone to annotate. Encoding first would allocate a UTF-8 copy
+ * of a fresh non-ASCII string only to throw it away on the idle path.
+ */
+static inline PyObject *
+zone_emit_text(PyObject *arg, const char *what,
+               void (*emit)(TracyCZoneCtx, const char *, size_t))
+{
+    if (check_str(arg, what) != 0) {
+        return NULL;
+    }
+    TracyCZoneCtx ctx = current_zone();
+    if (ctx.active) {
+        const char *s = NULL;
+        size_t len = 0;
+        if (resolve_text(arg, what, &s, &len) != 0) {
+            return NULL;
+        }
+        emit(ctx, s, len);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+py_zone_text(PyObject *Py_UNUSED(self), PyObject *arg)
+{
+    return zone_emit_text(arg, "zone text", ___tracy_emit_zone_text);
+}
+
+static PyObject *
+py_zone_name(PyObject *Py_UNUSED(self), PyObject *arg)
+{
+    return zone_emit_text(arg, "zone name", ___tracy_emit_zone_name);
+}
+
+static PyObject *
+py_zone_color(PyObject *Py_UNUSED(self), PyObject *arg)
+{
+    uint32_t color = 0;
+    if (resolve_color(arg, &color) != 0) {
+        return NULL;
+    }
+    ___tracy_emit_zone_color(current_zone(), color);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+py_zone_value(PyObject *Py_UNUSED(self), PyObject *arg)
+{
+    /* Tracy shows this as an unsigned 64-bit number alongside the zone. */
+    unsigned long long value = PyLong_AsUnsignedLongLong(arg);
+    if (value == (unsigned long long)-1 && PyErr_Occurred() != NULL) {
+        return NULL;
+    }
+    ___tracy_emit_zone_value(current_zone(), (uint64_t)value);
+    Py_RETURN_NONE;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Explicit zones.
+ *
+ * sys.monitoring gives one zone per Python frame; these add sub-function zones
+ * on the same per-thread stack, so the two interleave as ordinary nesting.
+ *
+ * Pairing is the caller's job and is guaranteed by the `zone` context manager in
+ * __init__.py — hence the private names. Both halves push/pop exactly one entry,
+ * so the stack stays balanced whatever else happens; the ordering caveat when a
+ * block spans a yield/await is documented on the context manager.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Fill in the source location of the `with` statement that opened this zone:
+ * our caller is zone.__enter__, so one frame further back is the user's code.
+ *
+ * Deliberately called only once connected. f_lineno is not a stored field —
+ * PyFrame_GetLineNumber maps the current bytecode offset through the code
+ * object's line table, which costs more the deeper in a function the statement
+ * sits (tens of microseconds in a very long one). Nothing here is worth paying
+ * for on the idle path.
+ *
+ * Tracy copies the strings into its own srcloc storage, so nothing here has to
+ * outlive the call — but the copy happens inside ___tracy_alloc_srcloc_name, so
+ * that call is made here, while the frame and code references are still held,
+ * rather than handing borrowed buffers back to the caller.
+ */
+static TPY_NOINLINE uint64_t
+alloc_caller_srcloc(const char *name, size_t name_len, uint32_t color)
+{
+    const char *file = "<unknown>", *func = "<unknown>";
+    size_t file_len = 9, func_len = 9;
+    uint32_t line = 0;
+
+    PyFrameObject *enter = PyEval_GetFrame();  /* borrowed */
+    PyFrameObject *caller = enter != NULL ? PyFrame_GetBack(enter) : NULL;  /* new ref */
+    PyCodeObject *code = NULL;
+    if (caller != NULL) {
+        line = (uint32_t)PyFrame_GetLineNumber(caller);
+        code = PyFrame_GetCode(caller);  /* new reference */
+    }
+    if (code != NULL) {
+        Py_ssize_t len = 0;
+        const char *s = PyUnicode_AsUTF8AndSize(code->co_filename, &len);
+        if (s != NULL) { file = s; file_len = (size_t)len; } else { PyErr_Clear(); }
+        s = PyUnicode_AsUTF8AndSize(code->co_qualname, &len);
+        if (s != NULL) { func = s; func_len = (size_t)len; } else { PyErr_Clear(); }
+    }
+    uint64_t srcloc = ___tracy_alloc_srcloc_name(line, file, file_len, func, func_len,
+                                                 name, name_len, color);
+    Py_XDECREF(code);
+    Py_XDECREF(caller);
+    return srcloc;
+}
+
+static PyObject *
+py_zone_begin(PyObject *Py_UNUSED(self), PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError,
+                        "_zone_begin(name, color) takes 2 arguments");
+        return NULL;
+    }
+    /* Check the arguments even while disconnected, so a bad call raises
+     * consistently rather than only once a viewer shows up. Encoding the name,
+     * and looking up the caller's source location, stay on the connected path. */
+    if (check_str(args[0], "zone name") != 0) {
+        return NULL;
+    }
+    uint32_t color = 0;
+    if (resolve_color(args[1], &color) != 0) {
+        return NULL;
+    }
+
+    zone_stack_t *st = &tls_stack;  /* resolve TLS once */
+    TracyCZoneCtx ctx;
+    if (___tracy_connected()) {
+        if (!st->named) {
+            name_current_thread(st);
+        }
+        const char *name = NULL;
+        size_t name_len = 0;
+        if (resolve_text(args[0], "zone name", &name, &name_len) != 0) {
+            return NULL;
+        }
+        ctx = ___tracy_emit_zone_begin_alloc(alloc_caller_srcloc(name, name_len, color),
+                                             1 /* active */);
+    } else {
+        /* No viewer: skip the zone work but still push, so the matching
+         * _zone_end() pops something and the stack stays balanced. */
+        ctx = TPY_INACTIVE_CTX;
+    }
+    push_zone(st, ctx);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+py_zone_end(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
+{
+    zone_stack_t *st = &tls_stack;
+    if (st->len != 0) {
+        pop_zone(st);
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *
 py_zone_unwind(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
 {
@@ -437,12 +770,16 @@ py_zone_unwind(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(ignored))
      * Turning sys.monitoring off stops event delivery immediately, including for
      * frames already executing — so the frames live at that moment (disable()
      * itself, profile.__exit__, and anything they were called from) never get
-     * their exit event, and their zones would stay open for the rest of the
-     * trace. tracypy.disable() calls this afterwards to close them.
+     * their exit event, and their zones would stay open forever. tracypy.disable()
+     * calls this afterwards to close them.
      *
      * Only this thread's stack is reachable from here. Frames in flight on other
      * threads when profiling stops leak the same way, which is inherent to
-     * stopping mid-call and is documented on disable(). */
+     * stopping mid-call and is documented on disable().
+     *
+     * This empties the whole stack, so an explicit `zone` block still open around
+     * the disable() call is closed early too; its __exit__ then pops whatever is
+     * topmost. Also documented on disable(). */
     zone_stack_t *st = &tls_stack;
     while (st->len != 0) {
         pop_zone(st);
@@ -499,6 +836,28 @@ static PyMethodDef tracypy_methods[] = {
     {"frame_mark_end", _PyCFunction_CAST(py_frame_mark_end), METH_FASTCALL,
      "frame_mark_end(name): end the discontinuous frame begun by "
      "frame_mark_start(name)."},
+    {"message", _PyCFunction_CAST(py_message), METH_FASTCALL,
+     "message(text, severity, color): emit a message on this thread's timeline.\n\n"
+     "severity is a Tracy severity (0=trace .. 5=fatal); color is 0xRRGGBB, or 0\n"
+     "for the viewer default. Inert until a viewer connects. Text longer than\n"
+     "65534 bytes is truncated (Tracy's wire limit)."},
+    {"zone_text", py_zone_text, METH_O,
+     "zone_text(text): attach text to the innermost open zone.\n\n"
+     "Annotates the calling function's zone. A no-op when no zone is open or no\n"
+     "viewer is connected. Text is truncated at 65534 bytes (Tracy's limit)."},
+    {"zone_name", py_zone_name, METH_O,
+     "zone_name(name): rename the innermost open zone.\n\n"
+     "Overrides the name the viewer shows for the calling function's zone."},
+    {"zone_color", py_zone_color, METH_O,
+     "zone_color(color): set the innermost open zone's color (0xRRGGBB)."},
+    {"zone_value", py_zone_value, METH_O,
+     "zone_value(value): attach an unsigned 64-bit number to the innermost zone."},
+    {"_zone_begin", _PyCFunction_CAST(py_zone_begin), METH_FASTCALL,
+     "_zone_begin(name, color): open an explicit zone at the caller's caller.\n\n"
+     "Private: pair it with _zone_end() via the `zone` context manager, whose\n"
+     "`with` statement is the source location the zone is reported at."},
+    {"_zone_end", py_zone_end, METH_NOARGS,
+     "_zone_end(): close the innermost open zone. Private; see _zone_begin."},
     {"_zone_unwind", py_zone_unwind, METH_NOARGS,
      "_zone_unwind(): end every zone still open on this thread.\n\n"
      "Private: called by tracypy.disable() to close the frames whose exit events\n"
