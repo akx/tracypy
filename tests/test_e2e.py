@@ -65,8 +65,8 @@ def test_capture_records_zones(tmp_path: Path) -> None:
     )
     try:
         # Capture writes the trace and exits once its -s window elapses.
-        cap_out, _ = capture.communicate(timeout=60)
-        client_out, _ = client.communicate(timeout=60)
+        cap_out, _ = capture.communicate(timeout=10)
+        client_out, _ = client.communicate(timeout=10)
     finally:
         for proc in (capture, client):
             if proc.poll() is None:
